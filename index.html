@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Global AQI Intelligence | 5-Day Multi-City</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        :root { --gold: #9e801b; --bg: #ffffff; --border: #eef0f2; --text: #1a1a1a; --muted: #64748b; }
+        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 30px; }
+        
+        .header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 25px; border-bottom: 2px solid var(--gold); padding-bottom: 15px; }
+        h1 { margin: 0; font-weight: 600; font-size: 22px; text-transform: uppercase; letter-spacing: 1px; }
+
+        /* Control Panel */
+        .control-panel { display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 25px; background: #fbfbfc; padding: 20px; border-radius: 12px; border: 1px solid var(--border); margin-bottom: 30px; }
+        .group { display: flex; flex-direction: column; gap: 10px; }
+        .label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; }
+        
+        .city-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+        .chip { padding: 6px 12px; border-radius: 20px; border: 1px solid #ddd; cursor: pointer; font-size: 13px; transition: 0.2s; background: white; }
+        .chip.active { background: var(--gold); color: white; border-color: var(--gold); }
+        
+        input, select { padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+
+        /* Visuals */
+        .chart-section { background: white; border: 1px solid var(--border); border-radius: 12px; padding: 20px; height: 400px; margin-bottom: 30px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        
+        .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; max-height: 400px; }
+        table { width: 100%; border-collapse: collapse; min-width: 1200px; font-size: 13px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); }
+        th { background: #f8fafc; position: sticky; top: 0; font-weight: 600; color: var(--muted); z-index: 5; }
+        .sticky-col { position: sticky; left: 0; background: #fff; z-index: 6; font-weight: 600; border-right: 2px solid var(--gold); }
+        
+        .aqi-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div>
+            <h1>Global Air Quality Analytics</h1>
+            <span style="font-size: 12px; color: var(--muted)">5-Day Hourly Historical Comparison (CPCB Standard)</span>
+        </div>
+        <div id="status" style="font-size: 12px; color: var(--gold);">Initializing System...</div>
+    </div>
+
+    <div class="control-panel">
+        <div class="group">
+            <span class="label">Select Cities</span>
+            <div id="city-list" class="city-chips"></div>
+        </div>
+        <div class="group">
+            <span class="label">Time Filter (Last 120 Hours)</span>
+            <div style="display: flex; gap: 10px;">
+                <input type="date" id="filter-date">
+                <select id="filter-hour"></select>
+            </div>
+            <span style="font-size: 11px; color: var(--muted)">Filter table to specific start point</span>
+        </div>
+        <div class="group">
+            <span class="label">Quick Actions</span>
+            <button onclick="resetFilters()" style="padding: 8px; cursor: pointer; border: 1px solid #ddd; border-radius: 6px; background: white;">Reset View</button>
+        </div>
+    </div>
+
+    <div class="chart-section">
+        <canvas id="multilineChart"></canvas>
+    </div>
+
+    <div class="table-wrap">
+        <table id="aqi-table">
+            <thead><tr id="table-head"></tr></thead>
+            <tbody id="table-body"></tbody>
+        </table>
+    </div>
+
+    <script>
+        const API_KEY = 'AIzaSyD-sKAUFhaCGFENHqjlyrQfhbgOplhxy-Q';
+        const CITIES = [
+            { name: "One Lodha Place", lat: 18.9967, lon: 72.8295, color: "#9e801b" },
+            { name: "Paris", lat: 48.8566, lon: 2.3522, color: "#2563eb" },
+            { name: "New York", lat: 40.7128, lon: -74.0060, color: "#dc2626" },
+            { name: "Shanghai", lat: 31.2304, lon: 121.4737, color: "#059669" },
+            { name: "London", lat: 51.5074, lon: -0.1278, color: "#7c3aed" }
+        ];
+
+        let globalData = {}; // Store raw data: { "CityName": [ {time, aqi}, ... ] }
+        let activeCities = new Set(CITIES.map(c => c.name));
+        let chartInstance = null;
+
+        // CPCB AQI Calculation
+        function getCPCB(pm25) {
+            if (pm25 == null) return null;
+            if (pm25 <= 30) return Math.round(pm25 * 50 / 30);
+            if (pm25 <= 60) return Math.round(50 + (pm25 - 30) * 50 / 30);
+            if (pm25 <= 90) return Math.round(100 + (pm25 - 60) * 100 / 30);
+            if (pm25 <= 120) return Math.round(200 + (pm25 - 90) * 100 / 30);
+            return Math.round(300 + (pm25 - 120) * 100 / 130);
+        }
+
+        async function fetchCityData(city) {
+            try {
+                const res = await fetch(`https://airquality.googleapis.com/v1/history:lookup?key=${API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ location: { latitude: city.lat, longitude: city.lon }, hours: 120, extraComputations: ["POLLUTANT_CONCENTRATION"] })
+                });
+                const data = await res.json();
+                return data.hoursInfo.map(h => ({
+                    time: new Date(h.dateTime),
+                    aqi: getCPCB(h.pollutants.find(p => p.code === 'pm25')?.concentration.value)
+                }));
+            } catch (e) { return []; }
+        }
+
+        async function init() {
+            document.getElementById('status').innerText = "Syncing 600 Data Points...";
+            
+            // Setup Hour dropdown
+            const hourSelect = document.getElementById('filter-hour');
+            for(let i=0; i<24; i++) {
+                let opt = document.createElement('option');
+                opt.value = i; opt.innerText = `${i}:00`;
+                hourSelect.appendChild(opt);
+            }
+
+            // Setup City Chips
+            const chipContainer = document.getElementById('city-list');
+            CITIES.forEach(city => {
+                const chip = document.createElement('div');
+                chip.className = 'chip active';
+                chip.innerText = city.name;
+                chip.onclick = () => {
+                    chip.classList.toggle('active');
+                    if(activeCities.has(city.name)) activeCities.delete(city.name);
+                    else activeCities.add(city.name);
+                    updateVisuals();
+                };
+                chipContainer.appendChild(chip);
+            });
+
+            // Fetch all data
+            for(let city of CITIES) {
+                globalData[city.name] = await fetchCityData(city);
+            }
+
+            document.getElementById('status').innerText = "System Live";
+            updateVisuals();
+        }
+
+        function updateVisuals() {
+            const tableHead = document.getElementById('table-head');
+            const tableBody = document.getElementById('table-body');
+            tableHead.innerHTML = '<th class="sticky-col">City / Time</th>';
+            tableBody.innerHTML = '';
+
+            const datasets = [];
+            let labels = [];
+
+            CITIES.forEach((city, idx) => {
+                if(!activeCities.has(city.name)) return;
+
+                const cityHistory = globalData[city.name] || [];
+                if(labels.length === 0) {
+                    labels = cityHistory.map(h => `${h.time.getDate()}/${h.time.getMonth()+1} ${h.time.getHours()}:00`);
+                }
+
+                datasets.push({
+                    label: city.name,
+                    data: cityHistory.map(h => h.aqi),
+                    borderColor: city.color,
+                    backgroundColor: city.color + "11",
+                    tension: 0.3,
+                    pointRadius: 2
+                });
+
+                // Row for table
+                let row = `<tr><td class="sticky-col">${city.name}</td>`;
+                cityHistory.forEach(h => {
+                    row += `<td>${h.aqi || '--'}</td>`;
+                });
+                row += '</tr>';
+                tableBody.innerHTML += row;
+            });
+
+            // Build table header times
+            labels.forEach(l => {
+                const th = document.createElement('th');
+                th.innerText = l;
+                tableHead.appendChild(th);
+            });
+
+            renderChart(labels, datasets);
+        }
+
+        function renderChart(labels, datasets) {
+            const ctx = document.getElementById('multilineChart').getContext('2d');
+            if(chartInstance) chartInstance.destroy();
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: { labels: labels.reverse(), datasets: datasets.map(d => ({...d, data: d.data.reverse()})) },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { position: 'bottom' } },
+                    scales: { y: { beginAtZero: true, title: { display: true, text: 'AQI' } } }
+                }
+            });
+        }
+
+        function resetFilters() {
+            activeCities = new Set(CITIES.map(c => c.name));
+            document.querySelectorAll('.chip').forEach(c => c.classList.add('active'));
+            updateVisuals();
+        }
+
+        init();
+    </script>
+</body>
+</html>
